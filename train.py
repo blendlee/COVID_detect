@@ -2,13 +2,15 @@ import random
 import pandas as pd
 import numpy as np
 import os
-import librosa
 import torch
 
-from tqdm import tqdm
+from tqdm import tqdm,trange
 from dataset import *
-from transformers import 
+from model import *
+from transformers import ResNetConfig, TrainingArguments,get_linear_schedule_with_warmup
+from torch.optim import AdamW
 from torch.utils.data import (DataLoader, RandomSampler)
+from sklearn.model_selection import StratifiedKFold
 
 CFG = {
     'SR':16000,
@@ -21,47 +23,58 @@ def seed_everything(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
 
+def split_data(dataset, num_splits):
+    split = StratifiedKFold(n_splits=num_splits, random_state=42, shuffle=True)
+    for train_index, dev_index in split.split(dataset, dataset["covid19"]):
+        train_dataset = dataset.loc[train_index]
+        dev_dataset = dataset.loc[dev_index]
+    
+        yield train_dataset, dev_dataset
+
 def main():
+
+    args = TrainingArguments(
+        output_dir='models',
+        evaluation_strategy="epoch",
+        learning_rate=2e-5,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=16,
+        num_train_epochs=5,
+        weight_decay=0.01,
+        
+    )
+
     seed_everything(CFG['SEED']) # Seed 고정
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-
-    df = pd.read_csv('data/train_data.csv')
-
-    #df 나누기
-
-    train_df = df[:100]
-    val_df =  df[100:]
-
-    train_dataset = CovidDataset(train_df)
-    valid_dataset = CovidDataset(val_df)
-
-    feature_extractor = AutoFeatureExtractor.from_pretrained("microsoft/resnet-50")
-    model = ResNetForImageClassification.from_pretrained("microsoft/resnet-50")
-
-    trained_data = train(train_dataset,model,feature_extractor)
-
-    inputs = feature_extractor(image, return_tensors="pt")
-
-    with torch.no_grad():
-        logits = model(**inputs).logits
-
-    # model predicts one of the 1000 ImageNet classes
-    predicted_label = logits.argmax(-1).item()
-    print(model.config.id2label[predicted_label])
+    MODEL_NAME = "microsoft/resnet-50"
+    dataset = pd.read_csv('data/new_train_data.csv')
+    extractor = AutoFeatureExtractor.from_pretrained(MODEL_NAME)
+    for fold, (train_df,val_df) in enumerate(split_data(dataset, num_splits=5), 1):
     
+        train_dataset = CovidDataset(train_df.reset_index(drop=True),extractor)
+        valid_dataset = CovidDataset(val_df.reset_index(drop=True),extractor)
+
+        config = ResNetConfig(MODEL_NAME)
+        model = COVIDModel(config,MODEL_NAME)
+        model.to(device)
+        trained_model = train(args,train_dataset,valid_dataset,model)
+    
+
+    save_pth=f'/opt/ml/COVID_detect/models/demo.pth'
+    torch.save(trained_model.state_dict(),save_pth)
 
     
 
 
-def train(dataset, model,feature_extractor):
-
+def train(args,train_dataset,val_dataset, model):
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     #kfold validation 추가 예정
-    train_sampler = RandomSampler(datasets)
-    train_dataloader = DataLoader(datasets, sampler=train_sampler, batch_size=args.per_device_train_batch_size)
+    train_sampler = RandomSampler(train_dataset)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.per_device_train_batch_size)
 
-    val_sampler=RandomSampler(val_datasets)
-    val_dataloader = DataLoader(val_datasets, sampler=val_sampler, batch_size=args.per_device_eval_batch_size)
+    val_sampler=RandomSampler(val_dataset)
+    val_dataloader = DataLoader(val_dataset, sampler=val_sampler, batch_size=args.per_device_eval_batch_size)
 
 
     no_decay = ['bias', 'LayerNorm.weight']
@@ -90,17 +103,18 @@ def train(dataset, model,feature_extractor):
     
             steps+=1
             model.train()
-            images= batch[3]
-            if torch.cuda.is_available():
-                batch = tuple(t.cuda()  for t in batch if type(t) != tuple)
-            inputs = {'image': batch[0],
-                      'age' = batch[1]
-                      'condition' = batch[2]
-                      'pain' = batch[3]
+
+
+            #if torch.cuda.is_available():
+            #    batch = tuple(t.cuda()  for t in batch if type(t) != tuple)
+            inputs = {'image': batch[0].squeeze().to(device),
+                      'age' : batch[1],
+                      'condition' : batch[2],
+                      'pain' : batch[3]
                         }
             
 
-            target = batch[-1]
+            target = batch[-1].to(device)
             outputs = model(**inputs,labels=target)
 
             
@@ -113,45 +127,40 @@ def train(dataset, model,feature_extractor):
             global_step += 1
             torch.cuda.empty_cache()
 
-        torch.save(model.state_dict(), f'/opt/ml/Project/VQA/models/vqa_1020_epoch{epoch+11}.pth')
+        #torch.save(model.state_dict(), f'/opt/ml/Project/VQA/models/vqa_1020_epoch{epoch+11}.pth')
         print(f'train loss : {total_loss/steps}')
 
-        # with torch.no_grad():
-        #     print('Calculating Valdiation Result............')
-        #     model.eval()
-        #     with open('/opt/ml/Project/VQA/data/1020_trainval_label2ans.kvqa.pkl','rb') as f :
-        #         label2ans = pickle.load(f)
-
-        #     val_loss=0
-        #     val_step=0
-        #     exact_match=0
-        #     for _, batch in enumerate(tqdm(val_dataloader)):
-        #         val_step+=1
-        #         images= batch[3]
-        #         if torch.cuda.is_available():
-        #             batch = tuple(t.cuda()  for t in batch if type(t) != tuple)
-        #         inputs = {'input_ids': batch[0],
-        #                     'token_type_ids': batch[1],
-        #                     'attention_mask': batch[2],
-        #                     'image' : images
-        #                     }
-        #         target = batch[-1]
-        #         outputs = model(**inputs,labels=target)
-        #         loss = outputs.loss
-        #         logits=outputs.logits
-        #         pred_idx = logits.argmax(-1)
-        #         val_loss+=loss
+        with torch.no_grad():
+            print('Calculating Valdiation Result............')
+            model.eval()
+            val_loss=0
+            val_step=0
+            exact_match=0
+            for _, batch in enumerate(tqdm(val_dataloader)):
+                val_step+=1
+                inputs = {'image': batch[0].squeeze().to(device),
+                        'age' : batch[1],
+                        'condition' : batch[2],
+                        'pain' : batch[3]
+                            }
+                target = batch[-1].to(device)
+                outputs = model(**inputs,labels=target)
+                loss = outputs.loss
+                logits=outputs.logits
+                pred_idx = logits.argmax(-1)
+                val_loss+=loss
                 
-        #         for step, idx in enumerate(pred_idx):
-        #             if target[step][idx] != 0:
-        #                 exact_match+=1
+                for i in range(len(target)):
+                    if target[i] == pred_idx[i]:
+                        exact_match+=1
 
-
-        #     val_loss /= val_step
-        #     exact_match /= len(val_datasets)
-        #     print(f'Validation loss : {val_loss}')
-        #     print(f'Validation Exact match : {exact_match*100}%')
-        
-
+            val_loss /= val_step
+            exact_match = exact_match/len(val_dataset)
+            print(f'Validation loss : {val_loss}')
+            print(f'Validation Exact match : {exact_match*100}%')
+     
         
     return model
+
+if __name__ == '__main__':
+    main()

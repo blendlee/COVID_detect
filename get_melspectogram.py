@@ -29,9 +29,12 @@ if __name__ == '__main__':
     hop_length = 512 # number of samples per time-step in spectrogram
     n_mels = 128 # number of bins in spectrogram. Height of image
     time_steps = 384 # number of time-steps. Width of image
-    wrong = ['data/train/03066.wav','data/train/01701.wav','data/train/02258.wav','data/train/02571.wav']
+    wrong = ['data/train/03066.wav','data/train/01701.wav','data/train/02258.wav','data/train/02571.wav','data/train/03325.wav',
+            'data/test/04166.wav','data/test/06741.wav','data/test/08268.wav','data/test/04571.wav','data/test/07696.wav',
+            'data/test/04880.wav','data/test/05793.wav','data/unlabeled/10273.wav','data/unlabeled/10803.wav','data/unlabeled/10859.wav',
+            'data/unlabeled/09921.wav','data/unlabeled/10513.wav','data/unlabeled/10573.wav','data/unlabeled/09816.wav']
     # load audio. Using example from librosa
-    data_types = ['train','test','unlabled']
+    data_types = ['unlabeled']
     for data_type in data_types:
         print(f'start downloading {data_type} data....')
         path = f'data/{data_type}'
